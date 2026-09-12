@@ -99,7 +99,7 @@ def test_dynamic_scan_and_report(tmp_path):
     ] for size in (1, 2, 4)), [])
     path = tmp_path / "report.json"
     export_report(report, path)
-    assert json.loads(path.read_text()) == report
+    assert json.loads(path.read_text(encoding="utf-8")) == report
 
 
 @pytest.mark.parametrize("nrc", [0x31, 0x12])
