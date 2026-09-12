@@ -38,6 +38,12 @@ CHANNELS = [
     (0x12, "4B30", "dme_misf_cyl4",   lambda b: struct.unpack(">H", b[0:2])[0]),
     (0x12, "58DB", "dme_misf_total",  lambda b: struct.unpack(">H", b[0:2])[0]),
     (0x12, "58F3", "dme_lpfp_kpa",    lambda b: struct.unpack(">H", b[0:2])[0] / 10),
+    (0x12, "4205", "dme_boost_act",   lambda b: struct.unpack(">H", b[0:2])[0] * 0.078125),
+    (0x12, "4AB0", "dme_boost_sp",    lambda b: struct.unpack(">H", b[0:2])[0] * 0.0390625),
+    (0x12, "4A7A", "dme_vanos_in_pwm", lambda b: struct.unpack(">h", b[0:2])[0] * 0.00305176),
+    (0x12, "4A7B", "dme_vanos_ex_pwm", lambda b: struct.unpack(">h", b[0:2])[0] * 0.00305176),
+    (0x12, "4A85", "dme_mix_adapt",   lambda b: struct.unpack(">H", b[0:2])[0] * 2 / 65536),
+    (0x12, "5889", "dme_lambda_b1",   lambda b: None if b[0:2] == b"\xff\xff" else struct.unpack(">H", b[0:2])[0] * 0.00024414),
     (0x18, "DA2A", "egs_turbine",     lambda b: struct.unpack(">h", b[0:2])[0]),
     (0x18, "DA2A", "egs_output",      lambda b: struct.unpack(">h", b[2:4])[0]),
     (0x18, "DA2E", "egs_gear",        lambda b: b[0]),
@@ -45,6 +51,7 @@ CHANNELS = [
     (0x18, "DA22", "egs_tcc_state",   lambda b: struct.unpack(">H", b[0:2])[0]),
     (0x18, "DA12", "egs_oil_temp",    lambda b: struct.unpack(">h", b[0:2])[0] - 48),
     (0x18, "DA34", "egs_eng_rpm",     lambda b: struct.unpack(">H", b[0:2])[0]),
+    (0x18, "41A1", "egs_adapt_cnt",   lambda b: struct.unpack(">H", b[0:2])[0]),
 ]
 
 # Minimum payload bytes each decode lambda needs (guards column-type flips)
@@ -53,6 +60,8 @@ MIN_LEN = {
     "dme_ivo": 2, "dme_evc": 2, "dme_int_flank": 2, "dme_exh_flank": 2, "dme_vanos_in_sp": 2, "dme_vanos_in_act": 2, "dme_vanos_ex_sp": 2, "dme_vanos_ex_act": 2,
     "dme_misf_cyl1": 2, "dme_misf_cyl2": 2, "dme_misf_cyl3": 2,
     "dme_misf_cyl4": 2, "dme_misf_total": 2, "dme_lpfp_kpa": 2,
+    "dme_boost_act": 2, "dme_boost_sp": 2, "dme_vanos_in_pwm": 2, "dme_vanos_ex_pwm": 2,
+    "dme_mix_adapt": 2, "dme_lambda_b1": 2, "egs_adapt_cnt": 2,
     "egs_turbine": 4, "egs_output": 4, "egs_gear": 2, "egs_range": 2,
     "egs_tcc_state": 2, "egs_oil_temp": 2, "egs_eng_rpm": 2,
 }
@@ -205,8 +214,9 @@ class Logger:
             svc = body[2]
             if svc == 0x62 and body[3:5] == did:
                 return {"status": "ok", "data": body[5:]}
-            if svc == 0x7F and len(body) >= 7 and body[3] == 0x22 and body[4:6] == did:
-                nrc = body[6]
+            if svc == 0x7F and len(body) >= 5 and body[3] == 0x22:
+                # Standard UDS NRC: 7F <rejected SID> <NRC> (no DID echo).
+                nrc = body[4]
                 if nrc == 0x78:
                     saw_pending = True  # response pending: keep waiting
                     continue
