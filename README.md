@@ -13,6 +13,7 @@
 - [Demo](#demo)
 - [Overview](#overview)
 - [Features](#features)
+- [G30 540i (B58) + ZF 8HP support — EXPERIMENTAL](#g30-540i-b58--zf-8hp-support--experimental)
 - [Technical Architecture](#technical-architecture)
 - [Development Journey](#development-journey)
 - [Installation](#installation)
@@ -63,6 +64,84 @@ The issue is determined to be (drumroll please): Pressure sag on the low pressur
 - **⚡ High Performance** - Sub-90ms sensor polling intervals. De-activating sensors speeds up polling for the rest
 - **🎨 Dark Theme UI** - “Precision Dark” instrument look. List areas use a **custom canvas-drawn scrollbar** (native `tk.Scrollbar` does not honor dark colours reliably on Windows)
 - **⚠️ Warning Indicators** - Visual alerts for out-of-range values based on per-sensor thresholds
+
+---
+
+## G30 540i (B58) + ZF 8HP support — EXPERIMENTAL
+
+> ⚠️ **WARNING — UNVERIFIED.** The `G30_B58` vehicle profile is experimental.
+> Its DME entries are carried over from the F10/N55 map and are flagged
+> `verified: false / confidence: "candidate"` — none of them have been
+> confirmed on a real B58. The 16 EGS (transmission) entries are placeholders
+> with **no DID at all**: no public G30/B58 DME or ZF 8HP DID map was found,
+> so their DIDs must be discovered on your own car with the DID scanner
+> below (or from an ISTA-over-ENET Wireshark capture). **Do not trust any
+> G30 value until you have validated it against ISTA live data on your car.**
+> The default profile remains `F10_N55`, exactly as upstream.
+
+### Vehicle profiles
+
+- Switch profiles from the **VEHICLE** dropdown in the sidebar. Switching
+  replaces the live sensor registry (with a timestamped backup of your
+  current `sensor.json`) and clears the gauge canvas — re-add the gauges
+  you want afterwards.
+- Active profile is persisted in `sensor.json` (`{"profile": ..., "sensors": [...]}`).
+- Every sensor carries provenance metadata: `verified` (bool), `confidence`
+  (`verified` / `candidate` / `unknown`), `source` (free text), plus
+  `ecu_confidence` / `ecu_source` for the ECU address. The built-in
+  templates in `profiles.py` are never mutated by the app or the scanner —
+  discoveries land in the live registry only.
+
+### DID scanner (read-only)
+
+Sidebar → **🔎 DID SCANNER (READ-ONLY)**. It opens its own TCP connection
+so the live dashboard is untouched.
+
+- Probes candidate DIDs (explicit hex like `F300`, comma/space separated,
+  or ranges like `1000-10FF`) on a chosen ECU (default `0x18`, the
+  researched-but-unverified EGS candidate address).
+- Per DID it tries UDS `0x2C` define-dynamic-DID at 1/2/4-byte widths, reads
+  5 samples via `0x22`, then **always clears the dynamic DID again**
+  (including on cancel). If the ECU rejects the define with NRC `0x12` or
+  `0x31`, it falls back to plain `0x22 <DID>` reads.
+- **Hard read-only allowlist: only `0x22` and `0x2C` are ever sent.**
+  Write (`0x2E`), routine (`0x31`), reset (`0x11`), security access (`0x27`)
+  etc. are refused before touching the wire. Gateway echo frames and
+  responses from other ECUs are ignored; NRCs are preserved (a `0x78`
+  response-pending followed by silence is reported as timeout-with-`0x78`).
+- **Export JSON** saves the full report (define/read/clear outcomes, NRCs,
+  raw min/max, timing, and a per-DID hint such as *"2-byte payload looks
+  rpm-like"*). **Apply to sensor…** copies a positive result into a
+  registry sensor as `candidate` / unverified, scale 1.0 — meaning and
+  scaling still unknown until you compare against ISTA.
+
+### EGS logging once DIDs are known
+
+Sensors whose ECU rejects `0x2C` are read with plain `0x22 <DID>` instead —
+the poller falls back automatically on NRC `0x12`/`0x31`, and you can also
+set a sensor's `read_mode` to `direct` in the sensor editor. A derived
+channel `tcc_slip_calc = engine_rpm − egs_turbine_speed` is computed live
+from fresh (< 2 s) samples once the turbine-speed DID is discovered.
+
+### ENET procedure / ISTA fallback
+
+1. ENET cable to car + laptop, ignition on. Run `enet_test.bat` (repo root)
+   — it finds the car IP, connects to TCP 6801 and reads the VIN with
+   `22 F1 90`. If the VIN comes back, the physical link and HSFZ path work.
+2. In ISTA, run the same measurement over ENET while capturing with
+   Wireshark on the Ethernet adapter (`tcp.port == 6801`), screen-recording
+   ISTA so raw frames can be correlated with displayed values. Capture DME
+   and EGS separately, 30–60 s each.
+3. Feed the observed DIDs into the scanner or the sensor editor, validate
+   each against ISTA live values, then mark `verified: true` /
+   `confidence: "verified"` in the sensor editor.
+
+### Attribution
+
+Original F10/N55 tool by
+[kaiwen-z / 77_wenz](https://github.com/kaiwen-z/bmw-enet-tool-public-wenz77-on-bimmerforums)
+(MIT). G30/B58 + EGS additions are a fork adaptation; upstream `F10_N55`
+defaults are preserved byte-for-value.
 
 ---
 

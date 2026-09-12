@@ -109,8 +109,8 @@ class SensorEditorDialog(tk.Toplevel):
         tk.Label(form, text="IDENTITY", bg=BG, fg=LABEL_C,
                  font=("Segoe UI", 8, "bold")).pack(fill="x", padx=12, pady=(10, 0))
         self._v_label = _row(form, "Label", sd.get("label", ""))
-        self._v_did = _row(form, "DID Address (hex)",
-                           f"0x{sd['did']:04X}" if "did" in sd else "")
+        self._v_did = _row(form, "DID Address (hex) — blank = undiscovered",
+                           f"0x{sd['did']:04X}" if sd.get("did") is not None else "")
         self._v_ecu = _row(form, "ECU Address (hex)",
                            f"0x{sd['ecu']:02X}" if "ecu" in sd else "0x12")
         self._v_size = _row(form, "Response Size (bytes)",
@@ -167,6 +167,8 @@ class SensorEditorDialog(tk.Toplevel):
     @staticmethod
     def _parse_hex(text):
         text = text.strip()
+        if not text:
+            return None  # blank = undiscovered placeholder DID
         if text.startswith(("0x", "0X")):
             return int(text, 16)
         return int(text, 16)

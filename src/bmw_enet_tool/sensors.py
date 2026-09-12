@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import copy
 
 _DEG_C = "\u00b0C"
 
@@ -37,6 +38,10 @@ def _make_scale_fn(scale, offset=0.0):
 # ── Internal registry ────────────────────────────────────
 _sensor_list = []   # ordered list of sensor dicts
 _sensor_map = {}    # sensor_id -> sensor dict
+
+#: Active vehicle profile name (persisted in sensor.json).  F10_N55 is the
+#: upstream default; G30_B58 is experimental until verified on Julian's car.
+_vehicle_profile = "F10_N55"
 
 # Backward-compatible tuple list.  Mutated **in-place** so every module that
 # did ``from .sensors import SENSORS`` keeps a live reference to the same
@@ -74,19 +79,58 @@ def _validate_sensor(s):
             return False, f"Missing required field: {key}"
     if not isinstance(s["sensor_id"], str) or not s["sensor_id"].strip():
         return False, "sensor_id must be a non-empty string"
-    if not isinstance(s["did"], int) or s["did"] < 0:
-        return False, "did must be a non-negative integer"
-    if not isinstance(s["ecu"], int) or s["ecu"] < 0:
-        return False, "ecu must be a non-negative integer"
-    if not isinstance(s["size"], int) or s["size"] < 1:
-        return False, "size must be a positive integer"
+    did = s["did"]
+    if did is not None:
+        if isinstance(did, bool) or not isinstance(did, int) \
+                or not (0 <= did <= 0xFFFF):
+            return False, "did must be None or an integer 0..0xFFFF"
+    ecu = s["ecu"]
+    if isinstance(ecu, bool) or not isinstance(ecu, int) \
+            or not (0 <= ecu <= 0xFF):
+        return False, "ecu must be an integer 0..0xFF"
+    size = s["size"]
+    if isinstance(size, bool) or not isinstance(size, int) \
+            or not (1 <= size <= 4):
+        return False, "size must be an integer 1..4"
+    # Provenance metadata — validated strictly when present.  add/update
+    # merge dicts, so edits preserve metadata fields they do not touch.
+    if "verified" in s and not isinstance(s["verified"], bool):
+        return False, "verified must be a boolean"
+    if "confidence" in s and s["confidence"] not in ("verified", "candidate",
+                                                     "unknown"):
+        return False, "confidence must be verified/candidate/unknown"
+    for key in ("source", "vehicle", "ecu_source"):
+        if key in s and (not isinstance(s[key], str) or not s[key].strip()):
+            return False, f"{key} must be a non-empty string"
+    if "ecu_confidence" in s and s["ecu_confidence"] not in ("verified",
+                                                             "researched",
+                                                             "unknown"):
+        return False, "ecu_confidence must be verified/researched/unknown"
+    if "read_mode" in s and s["read_mode"] not in ("dynamic", "direct"):
+        return False, "read_mode must be 'dynamic' or 'direct'"
+    if "derived_fn" in s:
+        from .derived import DERIVED_FUNCTIONS
+        fn = s["derived_fn"]
+        if not isinstance(fn, str) or fn not in DERIVED_FUNCTIONS:
+            return False, (
+                f"derived_fn must name a known derived function, got {fn!r}")
+    if "derived_from" in s:
+        df = s["derived_from"]
+        if (not isinstance(df, list) or len(df) < 2
+                or any(not isinstance(x, str) or not x.strip() for x in df)):
+            return False, "derived_from must be a list of >= 2 sensor_id strings"
     return True, ""
 
 
 # ── Public API ───────────────────────────────────────────
+def get_vehicle_profile():
+    """Return the active vehicle profile name (persisted in sensor.json)."""
+    return _vehicle_profile
+
+
 def load_sensors(path=None):
     """Load sensors from *sensor.json*.  Returns ``(ok, error_message)``."""
-    global _sensor_list, _sensor_map
+    global _sensor_list, _sensor_map, _vehicle_profile
     if path is None:
         path = _resolve_sensor_json_path()
     try:
@@ -112,8 +156,13 @@ def load_sensors(path=None):
         seen_ids.add(sid)
         loaded.append(s)
 
+    profile = data.get("profile", "F10_N55")
+    if not isinstance(profile, str) or not profile:
+        profile = "F10_N55"
+
     _sensor_list = loaded
     _sensor_map = {s["sensor_id"]: s for s in _sensor_list}
+    _vehicle_profile = profile
     _rebuild_compat()
     return True, ""
 
@@ -122,9 +171,30 @@ def save_sensors(path=None):
     """Persist the current sensor registry to *sensor.json*."""
     if path is None:
         path = _resolve_sensor_json_path()
-    data = {"sensors": _sensor_list}
+    data = {"profile": _vehicle_profile, "sensors": _sensor_list}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def replace_sensors(sensor_list, profile, path=None):
+    """Replace the whole registry with *sensor_list* and set the active
+    profile name.  Every entry is validated; on any failure nothing is
+    changed.  Persists to sensor.json (or *path* when given).  Scanner
+    discoveries live in the registry, never in the built-in profile
+    templates, so replacing the registry is also how a profile switch
+    is applied.
+    """
+    global _sensor_list, _sensor_map, _vehicle_profile
+    for s in sensor_list:
+        ok, msg = _validate_sensor(s)
+        if not ok:
+            sid = s.get("sensor_id") if isinstance(s, dict) else s
+            raise ValueError(f"Invalid sensor {sid!r}: {msg}")
+    _sensor_list = copy.deepcopy(sensor_list)
+    _sensor_map = {s["sensor_id"]: s for s in _sensor_list}
+    _vehicle_profile = profile
+    _rebuild_compat()
+    save_sensors(path)
 
 
 def get_sensors():
@@ -256,6 +326,7 @@ if not _init_ok:
     # sensor.json missing or invalid — seed from built-in defaults
     _sensor_list = [dict(s) for s in _BUILTIN_DEFAULTS]
     _sensor_map = {s["sensor_id"]: s for s in _sensor_list}
+    _vehicle_profile = "F10_N55"
     _rebuild_compat()
     try:
         save_sensors()

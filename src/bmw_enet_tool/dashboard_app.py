@@ -18,7 +18,10 @@ from .protocol import DYN_H, DYN_L, TESTER, hsfz, parse_hsfz
 from .sensors import (
     SENSORS, get_sensors, get_sensor_by_id, sensor_id_at, index_of,
     add_sensor, update_sensor, delete_sensor, _resolve_sensor_json_path,
+    get_vehicle_profile,
 )
+from .polling import build_poll_queue
+from . import profiles
 from .ui_theme import *  # noqa: F403
 from .gauge_canvas import GaugeHost
 from .gauge_editor_dialog import GaugeEditorDialog
@@ -84,6 +87,9 @@ class Dashboard(tk.Tk):
         self._poll_gen = 0
         self._last_gauge_update = None
         self._watchdog_id       = None
+        self._poll_direct_mode  = False  # current poll is a plain 0x22 read
+        self._samples           = {}     # sensor_id -> (phys, monotonic_ts)
+        self._raw_latest        = {}     # sensor_id -> latest raw int
 
         # Log replay
         self._replay_data     = []    # list of (ts_str, {sensor_id: phys})
@@ -106,8 +112,9 @@ class Dashboard(tk.Tk):
 
         tk.Label(hdr, text="BMW ENET", bg=PANEL, fg=ACCENT,
                  font=("Segoe UI", 16, "bold")).pack(side="left", padx=(18, 4), pady=14)
-        tk.Label(hdr, text="FXX  35i  N55  ·  LIVE DIAGNOSTICS",
-                 bg=PANEL, fg=DIM, font=("Segoe UI", 10)).pack(side="left", pady=14)
+        self._subtitle_lbl = tk.Label(hdr, text="",
+                                      bg=PANEL, fg=DIM, font=("Segoe UI", 10))
+        self._subtitle_lbl.pack(side="left", pady=14)
 
         vin_frame = tk.Frame(hdr, bg=PANEL)
         vin_frame.pack(side="left", padx=30, pady=10)
@@ -169,6 +176,25 @@ class Dashboard(tk.Tk):
         self._cbtn.pack(fill="x", padx=16, pady=(10, 4))
 
         self._sep(side)
+        tk.Label(side, text="  VEHICLE", bg=PANEL, fg=DIM,
+                 font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x", pady=(4, 6))
+        self._profile_var = tk.StringVar(value=get_vehicle_profile())
+        prof_menu = tk.OptionMenu(side, self._profile_var,
+                                  *sorted(profiles.PROFILES.keys()),
+                                  command=self._switch_vehicle_profile)
+        prof_menu.configure(bg=ENTRY_BG, fg=TEXT, activebackground=BTN_ACTIVE_BG,
+                            activeforeground=TEXT, relief="flat", bd=0,
+                            highlightthickness=1, highlightcolor=ACCENT,
+                            highlightbackground=BORDER, cursor="hand2",
+                            font=("Segoe UI", 9))
+        prof_menu.pack(fill="x", padx=16, pady=(2, 2))
+        self._profile_warn = tk.Label(
+            side, text="⚠ EXPERIMENTAL — verify every value on your car",
+            bg=PANEL, fg=WARNING_C, font=("Segoe UI", 7),
+            wraplength=196, justify="left", anchor="w")
+        self._profile_warn.pack(fill="x", padx=16, pady=(0, 4))
+
+        self._sep(side)
         tk.Label(side, text="  POLLING", bg=PANEL, fg=DIM,
                  font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x", pady=(4, 6))
 
@@ -178,6 +204,14 @@ class Dashboard(tk.Tk):
                                    cursor="hand2", command=self._toggle_polling,
                                    state="disabled")
         self._poll_btn.pack(fill="x", padx=16, pady=(2, 4))
+
+        self._scan_btn = tk.Button(side, text="🔎  DID SCANNER (READ-ONLY)",
+                                   bg=BTN_BG, fg=TEXT,
+                                   activebackground=BTN_ACTIVE_BG,
+                                   activeforeground=TEXT,
+                                   font=("Segoe UI", 9, "bold"), bd=0, pady=8,
+                                   cursor="hand2", command=self._open_did_scanner)
+        self._scan_btn.pack(fill="x", padx=16, pady=(0, 4))
 
         # ── Logging (collapsible) ──
         self._sep(side)
@@ -463,6 +497,8 @@ class Dashboard(tk.Tk):
         tk.Label(sb, textvariable=self._poll_status, bg=PANEL, fg=DIM,
                  font=("Courier New", 7)).pack(side="right", padx=12)
 
+        self._update_profile_subtitle()
+
     # ── Sensor list UI ──
     def _rebuild_sensor_list_ui(self):
         for child in self._sensor_inner.winfo_children():
@@ -509,18 +545,87 @@ class Dashboard(tk.Tk):
             self._update_sensor_row_style(sid)
 
     def _rebuild_poll_queue(self):
-        self._poll_queue = []
         # Only poll sensors that are actually drawn on the gauge canvas.
         # Not drawn == effectively disabled (saves ENET bandwidth).
-        for sid in list(getattr(self, "_gauges", {}).keys()):
-            s = get_sensor_by_id(sid)
-            if s is None:
-                continue
-            idx = index_of(sid)
-            if idx < 0 or idx >= len(SENSORS):
-                continue
-            scale_fn = SENSORS[idx][4]
-            self._poll_queue.append((s["ecu"], s["did"], s["size"], scale_fn, sid))
+        # Undiscovered placeholders (did None) and derived-only channels
+        # are skipped by build_poll_queue; a derived channel queues its
+        # source sensors instead.
+        drawn = list(getattr(self, "_gauges", {}).keys())
+        if not drawn:
+            self._poll_queue = []
+            return
+        self._poll_queue = build_poll_queue(get_sensors(), only_ids=drawn)
+
+    # ── Vehicle profile ──
+    def _update_profile_subtitle(self):
+        prof = get_vehicle_profile()
+        subtitle = {
+            "F10_N55": "F10  535i  N55  ·  LIVE DIAGNOSTICS",
+            "G30_B58": "G30  540i  B58  ·  EXPERIMENTAL — UNVERIFIED",
+        }.get(prof, f"{prof}  ·  LIVE DIAGNOSTICS")
+        try:
+            self._subtitle_lbl.configure(text=subtitle)
+        except Exception:
+            pass
+        try:
+            if prof == "F10_N55":
+                self._profile_warn.pack_forget()
+            else:
+                self._profile_warn.pack(fill="x", padx=16, pady=(0, 4))
+        except Exception:
+            pass
+
+    def _switch_vehicle_profile(self, name):
+        if name == get_vehicle_profile():
+            return
+        if self._polling or self._logging or self._replay_state != "idle":
+            self._evt("Stop polling/logging/replay before switching vehicle profile",
+                      "warn")
+            self._profile_var.set(get_vehicle_profile())
+            return
+        try:
+            backup = profiles.switch_profile(name, _resolve_sensor_json_path())
+        except Exception as e:
+            self._evt(f"Profile switch failed: {e}", "err")
+            self._profile_var.set(get_vehicle_profile())
+            return
+        self._gauge_host.clear()
+        self._gauges = {}
+        self._disabled_gauges.clear()
+        self._samples = {}
+        self._raw_latest = {}
+        self._log_latest = {}
+        self._rebuild_sensor_list_ui()
+        self._rebuild_poll_queue()
+        self._update_profile_subtitle()
+        self._evt(f"Vehicle profile → {name} "
+                  f"(previous sensor.json backed up)", "ok")
+        if name == "G30_B58":
+            self._evt("G30/B58 is EXPERIMENTAL — every DME value is carried "
+                      "over unverified and every EGS DID is undiscovered. "
+                      "Use the DID scanner on your 2018 540i.", "warn")
+
+    # ── DID scanner ──
+    def _open_did_scanner(self):
+        from .did_scanner_dialog import DIDScannerDialog
+        ip = self._ip_var.get().strip()
+        try:
+            port = int(self._port_var.get().strip())
+        except ValueError:
+            self._evt("Port must be an integer", "err")
+            return
+        if not ip:
+            self._evt("Set the target IP first", "err")
+            return
+        DIDScannerDialog(self, ip, port, on_applied=self._on_scanner_applied)
+
+    def _on_scanner_applied(self, sensor_id):
+        self._rebuild_sensor_list_ui()
+        self._rebuild_poll_queue()
+        s = get_sensor_by_id(sensor_id)
+        self._evt(f"Scanner discovery applied to "
+                  f"{s['label'] if s else sensor_id} (candidate/unverified)",
+                  "ok")
 
     # ── Focus management ──
     def _on_global_click(self, event):
@@ -1051,21 +1156,42 @@ class Dashboard(tk.Tk):
                 snapshot = self._poll_pending
                 if snapshot:
                     _, _, _, _, gen, ecu = snapshot
-                    if gen == self._poll_gen and self._polling and self._running:
+                    if gen == self._poll_gen and src == ecu \
+                            and self._polling and self._running:
                         self._do_send(ecu, bytes([0x22, DYN_H, DYN_L]))
                 continue
             if (uds and len(uds) >= 4
                     and uds[0] == 0x6C and uds[1] == 0x03
                     and uds[2] == DYN_H and uds[3] == DYN_L):
                 if self._polling and self._running:
-                    self._poll_next()
+                    # Route through the UI-thread queue so the next poll is
+                    # started from a single, race-free place.
+                    self._pkt_queue.put(("poll_next", self._poll_gen))
                 continue
             if (uds and len(uds) >= 3
                     and uds[0] == 0x62 and uds[1] == DYN_H and uds[2] == DYN_L):
                 snapshot = self._poll_pending
-                self._poll_pending = None
-                if snapshot:
-                    self._pkt_queue.put(("sensor", uds[3:], snapshot))
+                if snapshot and self._polling and self._running:
+                    did, sz, scale_fn, sensor_id, gen, ecu = snapshot
+                    if (gen == self._poll_gen and src == ecu
+                            and not getattr(self, "_poll_direct_mode", False)
+                            and len(uds) >= 3 + sz):
+                        self._poll_pending = None
+                        self._pkt_queue.put(("sensor", uds[3:3 + sz], snapshot))
+                    # else: short payload / wrong ECU / stale — keep pending
+            elif (uds and len(uds) >= 3 and uds[0] == 0x62
+                  and getattr(self, "_poll_direct_mode", False)):
+                # Plain 0x22 <DID> response (direct read mode / fallback).
+                snapshot = self._poll_pending
+                if snapshot and self._polling and self._running:
+                    did, sz, scale_fn, sensor_id, gen, ecu = snapshot
+                    if (gen == self._poll_gen and src == ecu
+                            and uds[1] == ((did >> 8) & 0xFF)
+                            and uds[2] == (did & 0xFF)
+                            and len(uds) >= 4):
+                        self._poll_pending = None
+                        self._pkt_queue.put(
+                            ("sensor_direct", uds[3:3 + sz], snapshot))
             elif (uds and len(uds) >= 3
                   and uds[0] == 0x62 and uds[1] == 0xF1 and uds[2] == 0x90):
                 try:
@@ -1099,6 +1225,7 @@ class Dashboard(tk.Tk):
             if self._poll_timeout_id:
                 self.after_cancel(self._poll_timeout_id)
                 self._poll_timeout_id = None
+            self._poll_direct_mode = False
             self._stop_watchdog()
             self._poll_btn.configure(text="▶  START POLLING", bg=BTN_BG, fg=DIM)
             self._delay_var.set("— ms")
@@ -1109,6 +1236,7 @@ class Dashboard(tk.Tk):
             self._polling = True
             self._poll_idx = 0
             self._poll_pending = None
+            self._poll_direct_mode = False
             self._last_gauge_update = time.monotonic()
             self._poll_btn.configure(text="■  STOP POLLING", bg=WARNING_C, fg=BLACK)
             self._evt("Polling started", "ok")
@@ -1128,10 +1256,55 @@ class Dashboard(tk.Tk):
         dh = (did >> 8) & 0xFF
         dl = did & 0xFF
         self._poll_pending = (did, sz, scale_fn, sensor_id, gen, ecu)
-        self._do_send(ecu, bytes([0x2C, 0x01, DYN_H, DYN_L, dh, dl, 0x01, sz]))
+        s = get_sensor_by_id(sensor_id)
+        read_mode = (s.get("read_mode") if s else None) or "dynamic"
+        if read_mode == "direct":
+            # Plain 0x22 read — for ECUs/sensors where 0x2C is unsupported.
+            self._poll_direct_mode = True
+            self._do_send(ecu, bytes([0x22, dh, dl]))
+        else:
+            self._poll_direct_mode = False
+            self._do_send(ecu, bytes([0x2C, 0x01, DYN_H, DYN_L, dh, dl, 0x01, sz]))
         if self._poll_timeout_id:
             self.after_cancel(self._poll_timeout_id)
         self._poll_timeout_id = self.after(500, self._poll_stall_timeout, gen)
+
+    def _complete_poll(self, sensor_id: str, phys: float, raw: int):
+        """Record a finished poll: raw cache, gauge, log row, derived channels."""
+        self._raw_latest[sensor_id] = raw
+        g = self._gauges.get(sensor_id)
+        if g is not None:
+            try:
+                g.update_value(phys, raw)
+            except Exception:
+                pass
+        self._log_write(sensor_id, phys)
+        self._update_derived(sensor_id, phys)
+
+    def _update_derived(self, sensor_id: str, phys: float):
+        """Feed a fresh sample into derived channels and emit new values."""
+        from .derived import compute_derived
+        now = time.monotonic()
+        self._samples[sensor_id] = (phys, now)
+        for s in get_sensors():
+            sources = s.get("derived_from")
+            if not sources or sensor_id not in sources:
+                continue
+            try:
+                val = compute_derived(s, self._samples, now)
+            except Exception:
+                continue
+            if val is None:
+                continue
+            dsid = s["sensor_id"]
+            self._raw_latest[dsid] = val
+            g = self._gauges.get(dsid)
+            if g is not None:
+                try:
+                    g.update_value(val, val)
+                except Exception:
+                    pass
+            self._log_write(dsid, val)
 
     _stall_count = 0
 
@@ -1249,7 +1422,8 @@ class Dashboard(tk.Tk):
         if not self._logging or not self._log_file: return
         self._log_latest[sensor_id] = phys
         ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        entry = {"ts": ts, "d": dict(self._log_latest)}
+        entry = {"ts": ts, "d": dict(self._log_latest),
+                 "raw": dict(self._raw_latest)}
         try:
             self._log_file.write(_json.dumps(entry, ensure_ascii=False) + "\n")
             self._log_row_count += 1
@@ -1777,12 +1951,37 @@ class Dashboard(tk.Tk):
                     nrc_bytes = data
                     nrc_code  = nrc_bytes[2] if len(nrc_bytes) >= 3 else 0
                     svc       = nrc_bytes[1] if len(nrc_bytes) >= 2 else 0
-                    self._evt(f"NRC 0x{nrc_code:02X} svc 0x{svc:02X} — skipping", "warn")
+                    pending = self._poll_pending
+                    self._poll_pending = None
                     if self._poll_timeout_id:
                         self.after_cancel(self._poll_timeout_id)
                         self._poll_timeout_id = None
-                    self._poll_pending = None
-                    self.after(self._poll_delay, self._poll_next)
+                    if (pending is not None and svc == 0x2C
+                            and nrc_code in (0x12, 0x31)
+                            and self._polling and self._running):
+                        # ECU rejected the dynamic-DID define (0x12/0x31) —
+                        # fall back to a plain 0x22 <DID> read for this poll.
+                        did, sz, scale_fn, sensor_id, gen, ecu = pending
+                        self._evt(
+                            f"0x2C unsupported (NRC 0x{nrc_code:02X}) — "
+                            f"direct 0x22 read for DID 0x{did:04X}", "warn")
+                        self._poll_pending = (did, sz, scale_fn,
+                                              sensor_id, gen, ecu)
+                        self._poll_direct_mode = True
+                        self._do_send(ecu, bytes([0x22, (did >> 8) & 0xFF,
+                                                  did & 0xFF]))
+                        self._poll_timeout_id = self.after(
+                            500, self._poll_stall_timeout, gen)
+                    else:
+                        self._evt(f"NRC 0x{nrc_code:02X} svc 0x{svc:02X} — skipping",
+                                  "warn")
+                        self.after(self._poll_delay, self._poll_next)
+
+                elif kind == "poll_next":
+                    # Queued by _parse_rx after a dynamic-DID clear response.
+                    if data == self._poll_gen \
+                            and self._polling and self._running:
+                        self._poll_next()
 
                 elif kind == "vin":
                     self._vin = data
@@ -1794,6 +1993,8 @@ class Dashboard(tk.Tk):
                     did, sz, scale_fn, sensor_id, gen, ecu = snapshot
                     if gen != self._poll_gen:
                         continue
+                    if not self._polling or not self._running:
+                        continue  # late data after stop — never gauge/log it
                     self._do_send(ecu, bytes([0x2C, 0x03, DYN_H, DYN_L]))
                     if self._poll_timeout_id:
                         self.after_cancel(self._poll_timeout_id)
@@ -1812,14 +2013,44 @@ class Dashboard(tk.Tk):
                     raw = int.from_bytes(value_bytes[:sz], "big")
                     try: phys = scale_fn(raw)
                     except Exception: phys = float(raw)
-                    g = self._gauges.get(sensor_id)
-                    if g is not None:
-                        g.update_value(phys, raw)
-                    self._log_write(sensor_id, phys)
+                    self._complete_poll(sensor_id, phys, raw)
                     s = get_sensor_by_id(sensor_id)
                     lbl = s["label"] if s else sensor_id
                     self._poll_status.set(
                         f"last: {lbl} = {phys:.2f}  raw={raw}  DID=0x{did:04X}")
+
+                elif kind == "sensor_direct":
+                    # Plain 0x22 <DID> response — no dynamic DID to clear.
+                    value_bytes, snapshot = data, item[2]
+                    did, sz, scale_fn, sensor_id, gen, ecu = snapshot
+                    if gen != self._poll_gen:
+                        continue
+                    if not self._polling or not self._running:
+                        continue  # late data after stop — never gauge/log it
+                    if self._poll_timeout_id:
+                        self.after_cancel(self._poll_timeout_id)
+                        self._poll_timeout_id = None
+                    self._stall_count = 0
+                    now = time.monotonic()
+                    self._last_gauge_update = now
+                    if self._last_sensor_time is not None:
+                        ms = (now - self._last_sensor_time) * 1000
+                        self._delay_samples.append(ms)
+                        if len(self._delay_samples) > 30:
+                            self._delay_samples.pop(0)
+                        avg = sum(self._delay_samples) / len(self._delay_samples)
+                        self._delay_var.set(f"{avg:.1f} ms")
+                    self._last_sensor_time = now
+                    raw = int.from_bytes(value_bytes[:sz], "big") \
+                        if value_bytes else 0
+                    try: phys = scale_fn(raw)
+                    except Exception: phys = float(raw)
+                    self._complete_poll(sensor_id, phys, raw)
+                    s = get_sensor_by_id(sensor_id)
+                    lbl = s["label"] if s else sensor_id
+                    self._poll_status.set(
+                        f"last: {lbl} = {phys:.2f}  raw={raw}  "
+                        f"DID=0x{did:04X} (direct)")
 
                 elif kind == "discover_result":
                     self._discovering = False
