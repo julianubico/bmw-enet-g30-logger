@@ -37,6 +37,7 @@ CHANNELS = [
     (0x12, "4B25", "dme_misf_cyl3",   lambda b: struct.unpack(">H", b[0:2])[0]),
     (0x12, "4B30", "dme_misf_cyl4",   lambda b: struct.unpack(">H", b[0:2])[0]),
     (0x12, "58DB", "dme_misf_total",  lambda b: struct.unpack(">H", b[0:2])[0]),
+    (0x12, "58F3", "dme_lpfp_kpa",    lambda b: struct.unpack(">H", b[0:2])[0] / 10),
     (0x18, "DA2A", "egs_turbine",     lambda b: struct.unpack(">h", b[0:2])[0]),
     (0x18, "DA2A", "egs_output",      lambda b: struct.unpack(">h", b[2:4])[0]),
     (0x18, "DA2E", "egs_gear",        lambda b: b[0]),
@@ -51,7 +52,7 @@ MIN_LEN = {
     "dme_rpm": 2, "dme_coolant_raw": 1, "dme_pedal": 2, "dme_throttle": 2,
     "dme_ivo": 2, "dme_evc": 2, "dme_int_flank": 2, "dme_exh_flank": 2, "dme_vanos_in_sp": 2, "dme_vanos_in_act": 2, "dme_vanos_ex_sp": 2, "dme_vanos_ex_act": 2,
     "dme_misf_cyl1": 2, "dme_misf_cyl2": 2, "dme_misf_cyl3": 2,
-    "dme_misf_cyl4": 2, "dme_misf_total": 2,
+    "dme_misf_cyl4": 2, "dme_misf_total": 2, "dme_lpfp_kpa": 2,
     "egs_turbine": 4, "egs_output": 4, "egs_gear": 2, "egs_range": 2,
     "egs_tcc_state": 2, "egs_oil_temp": 2, "egs_eng_rpm": 2,
 }
