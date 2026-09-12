@@ -20,12 +20,12 @@ EGS = 0x18
 # Validated DIDs (2026-09-12 on Julian's G30 via 169.254.126.74)
 # (ecu, did_hex, name, decode_fn)
 CHANNELS = [
-    (0x12, "4807", "dme_rpm",         lambda b: struct.unpack(">H", b[0:2])[0] * 0.25),
+    (0x12, "4807", "dme_rpm",         lambda b: struct.unpack(">H", b[0:2])[0] * 0.5),
     (0x12, "4300", "dme_coolant_raw",  lambda b: b.hex()),
     (0x12, "480B", "dme_pedal",       lambda b: struct.unpack(">H", b[0:2])[0] * 100 / 65535),
     (0x12, "4600", "dme_throttle_raw",lambda b: b.hex()),
-    (0x12, "4506", "dme_int_cam",     lambda b: struct.unpack(">H", b[0:2])[0] / 10),
-    (0x12, "4507", "dme_exh_cam",     lambda b: struct.unpack(">H", b[0:2])[0] / 10),
+    # REMOVED 2026-09-12: DID 4506 returns non-physical random values on MG1 DME (not valid cam data)
+    # REMOVED 2026-09-12: DID 4507 returns non-physical random values on MG1 DME (not valid cam data)
     (0x12, "581A", "dme_ivo",         lambda b: struct.unpack(">h", b[0:2])[0] / 128),
     (0x12, "581C", "dme_evc",         lambda b: struct.unpack(">h", b[0:2])[0] / 128),
     (0x12, "4B23", "dme_misf_cyl1",   lambda b: struct.unpack(">H", b[0:2])[0]),
@@ -45,7 +45,7 @@ CHANNELS = [
 # Minimum payload bytes each decode lambda needs (guards column-type flips)
 MIN_LEN = {
     "dme_rpm": 2, "dme_coolant_raw": 1, "dme_pedal": 2, "dme_throttle_raw": 2,
-    "dme_int_cam": 2, "dme_exh_cam": 2, "dme_ivo": 2, "dme_evc": 2,
+    "dme_ivo": 2, "dme_evc": 2,
     "dme_misf_cyl1": 2, "dme_misf_cyl2": 2, "dme_misf_cyl3": 2,
     "dme_misf_cyl4": 2, "dme_misf_total": 2,
     "egs_turbine": 4, "egs_output": 4, "egs_gear": 2, "egs_range": 2,
